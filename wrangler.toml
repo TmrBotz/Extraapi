@@ -1,3 +1,23 @@
-name       = "skymovieshd-scraper"
-main       = "index.js"
-compatibility_date = "2024-04-01"
+name = "extraflix-scraper"
+main = "src/index.js"
+compatibility_date = "2024-12-18"
+
+# KV Storage
+[[kv_namespaces]]
+binding = "KV_STORE"
+id = "YOUR_KV_NAMESPACE_ID"
+preview_id = "YOUR_PREVIEW_KV_ID"
+
+# Environment variables
+[vars]
+MAX_RETRIES = "3"
+REQUEST_TIMEOUT = "30000"
+
+# Limits
+[limits]
+cpu_ms = 50
+subrequests = 50
+
+# Observability
+[observability]
+enabled = true
