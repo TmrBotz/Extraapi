@@ -77,7 +77,6 @@ async function scrapePost(postUrl) {
         console.log(`🔗 Resolving: ${link.url}`);
         const finalUrl = await resolveShortLink(link.url);
         finalLinks.push({
-          finalUrl: finalUrl.mainUrl,
           fileInfo: finalUrl.fileInfo,
           fileSize: finalUrl.fileSize,
           mirrors: finalUrl.mirrors || [],
@@ -95,10 +94,7 @@ async function scrapePost(postUrl) {
 
     return {
       success: true,
-      url: postUrl,
       title: title,
-      poster: poster,
-      imdbRating: imdbRating,
       totalLinks: downloadLinks.length,
       links: finalLinks,
       scrapedAt: new Date().toISOString()
