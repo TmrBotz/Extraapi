@@ -1,34 +1,17 @@
 // ============================================================
 //  HubDrive → HubCloud → Sportverse  DL Link Extractor
-//  Cloudflare Worker  |  Professional Web Scraper
+//  Cloudflare Worker with FlareSolverr Integration
+//  Professional Web Scraper
 // ============================================================
 
-// Advanced headers with realistic browser fingerprint
-function getHeaders(referer = null) {
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-    "Sec-Ch-Ua": '"Not/A)Brand";v="99", "Google Chrome";v="126", "Chromium";v="126"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "DNT": "1",
-  };
-  
-  if (referer) {
-    headers["Referer"] = referer;
-  }
-  
-  return headers;
-}
+// ─── Configuration ──────────────────────────────────────────
+const CONFIG = {
+  // FlareSolverr service (self-host or use public)
+  FLARESOLVERR_URL: "https://flare.solverr.com/v1", // Public instance (rate limited)
+  // For self-hosting: http://localhost:8191/v1
+  TIMEOUT: 60000,
+  MAX_RETRIES: 3,
+};
 
 // ─── CORS helper ───────────────────────────────────────────
 function corsHeaders(origin = "*") {
@@ -54,83 +37,183 @@ function errorResponse(message, step = null, status = 400) {
   return jsonResponse({ success: false, error: message, step }, status);
 }
 
-// ─── Enhanced Fetch with Browser Simulation ──────────────
-async function fetchPage(url, referer = null) {
-  const headers = getHeaders(referer);
-  
+// ─── Fetch with FlareSolverr ──────────────────────────────
+async function fetchWithFlareSolverr(url, referer = null) {
+  const requestData = {
+    cmd: "request.get",
+    url: url,
+    maxTimeout: CONFIG.TIMEOUT,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept-Encoding": "gzip, deflate, br",
+      "Connection": "keep-alive",
+    },
+  };
+
+  if (referer) {
+    requestData.headers.Referer = referer;
+  }
+
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: headers,
-      redirect: "follow",
-      // Cloudflare specific options
-      cf: {
-        cacheTtl: 0,
-        cacheEverything: false,
-        // Try to use different colo
-      }
+    const response = await fetch(CONFIG.FLARESOLVERR_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestData),
     });
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+    if (!response.ok) {
+      throw new Error(`FlareSolverr error: ${response.status}`);
     }
 
-    // Get response as text but preserve headers for debugging
-    const text = await res.text();
-    return text;
+    const data = await response.json();
+    
+    if (data.status !== "ok") {
+      throw new Error(`FlareSolverr: ${data.message || "Unknown error"}`);
+    }
+
+    return data.solution.response;
   } catch (error) {
-    console.error(`Fetch error for ${url}:`, error);
+    console.error("FlareSolverr fetch error:", error);
     throw error;
   }
 }
 
-// ─── STEP 1: hubdrive.tips/file/{id} ──────────────────────
-function parseHubDrive(html, pageUrl) {
-  // File metadata
-  const titleMatch = html.match(/<title>HubDrive \| (.+?)<\/title>/i);
-  const fileName = titleMatch ? titleMatch[1].trim() : null;
+// ─── Fallback: Direct fetch with advanced headers ─────────
+async function fetchDirect(url, referer = null) {
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+  };
+  
+  if (referer) {
+    headers["Referer"] = referer;
+  }
 
+  const response = await fetch(url, {
+    method: "GET",
+    headers: headers,
+    redirect: "follow",
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  return await response.text();
+}
+
+// ─── Smart fetch with retry logic ─────────────────────────
+async function fetchPage(url, referer = null, retryCount = 0) {
+  try {
+    // First try: FlareSolverr
+    console.log(`Fetching ${url} via FlareSolverr...`);
+    return await fetchWithFlareSolverr(url, referer);
+  } catch (error) {
+    console.log(`FlareSolverr failed: ${error.message}`);
+    
+    // Second try: Direct fetch
+    try {
+      console.log(`Trying direct fetch for ${url}...`);
+      return await fetchDirect(url, referer);
+    } catch (directError) {
+      console.log(`Direct fetch failed: ${directError.message}`);
+      
+      // Retry with FlareSolverr
+      if (retryCount < CONFIG.MAX_RETRIES) {
+        console.log(`Retry ${retryCount + 1}/${CONFIG.MAX_RETRIES}...`);
+        await new Promise(resolve => setTimeout(resolve, 2000 * (retryCount + 1)));
+        return fetchPage(url, referer, retryCount + 1);
+      }
+      
+      throw error;
+    }
+  }
+}
+
+// ─── STEP 1: hubdrive.tips/file/{id} ──────────────────────
+function parseHubDrive(html) {
+  const result = {
+    fileName: null,
+    fileSize: null,
+    fileType: null,
+    hubcloudUrl: null,
+    telegramDirect: null,
+  };
+
+  // File name
+  const titleMatch = html.match(/<title>HubDrive \| (.+?)<\/title>/i);
+  if (titleMatch) result.fileName = titleMatch[1].trim();
+
+  // File size
   const sizeMatch = html.match(
     /<td>File Size<\/td>\s*<td[^>]*>([\d.]+ [A-Z]+)<\/td>/i
   );
-  const fileSize = sizeMatch ? sizeMatch[1].trim() : null;
+  if (sizeMatch) result.fileSize = sizeMatch[1].trim();
 
+  // File type
   const typeMatch = html.match(
     /<td>File Type<\/td>\s*<td[^>]*>([^<]+)<\/td>/i
   );
-  const fileType = typeMatch ? typeMatch[1].trim() : null;
+  if (typeMatch) result.fileType = typeMatch[1].trim();
 
-  // HubCloud link
-  const hubcloudMatch = html.match(
-    /href="(https:\/\/hubcloud\.ist\/drive\/[^"]+)"/i
-  );
-  const hubcloudUrl = hubcloudMatch ? hubcloudMatch[1] : null;
+  // HubCloud link (multiple patterns)
+  const patterns = [
+    /href="(https:\/\/hubcloud\.ist\/drive\/[^"]+)"/i,
+    /href="(https:\/\/hubcloud\.cx\/drive\/[^"]+)"/i,
+    /window\.location\.href\s*=\s*['"]([^'"]+drive[^'"]+)['"]/i,
+  ];
 
-  // Telegram link from hubdrive page
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) {
+      result.hubcloudUrl = match[1];
+      break;
+    }
+  }
+
+  // Telegram direct
   const tgMatch = html.match(
-    /href="(https:\/\/hubcloud\.ist\/tg\/go\?id=[^"]+)"/i
+    /href="(https:\/\/hubcloud\.(?:ist|cx)\/tg\/go\?id=[^"]+)"/i
   );
-  const telegramDirect = tgMatch ? tgMatch[1] : null;
+  if (tgMatch) result.telegramDirect = tgMatch[1];
 
-  if (!hubcloudUrl) {
+  if (!result.hubcloudUrl) {
     throw new Error("HubCloud link not found on HubDrive page");
   }
 
-  return { fileName, fileSize, fileType, hubcloudUrl, telegramDirect };
+  return result;
 }
 
 // ─── STEP 2: hubcloud.ist/drive/{drive_id} ─────────────────
-function parseHubCloud(html, driveUrl) {
+function parseHubCloud(html) {
   let sportverseUrl = null;
 
-  const varMatch = html.match(/var\s+url\s*=\s*['"]([^'"]+sportverse[^'"]+)['"]/i);
-  if (varMatch) sportverseUrl = varMatch[1];
+  const patterns = [
+    /var\s+url\s*=\s*['"]([^'"]+sportverse[^'"]+)['"]/i,
+    /<a[^>]+id=["']download["'][^>]+href=["']([^"']+sportverse[^"']+)["']/i,
+    /window\.location\.href\s*=\s*['"]([^'"]+sportverse[^'"]+)['"]/i,
+    /href="(https:\/\/sportverse\.cc[^"]+)"/i,
+  ];
 
-  if (!sportverseUrl) {
-    const anchorMatch = html.match(
-      /<a[^>]+id=["']download["'][^>]+href=["']([^"']+sportverse[^"']+)["']/i
-    );
-    if (anchorMatch) sportverseUrl = anchorMatch[1];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) {
+      sportverseUrl = match[1];
+      break;
+    }
   }
 
   if (!sportverseUrl) {
@@ -144,27 +227,31 @@ function parseHubCloud(html, driveUrl) {
 function parseSportverse(html) {
   const links = {};
 
+  // FSL Server
   const fslMatch = html.match(/<a[^>]+id=["']fsl["'][^>]+href=["']([^"']+)["']/i);
   if (fslMatch) links.fsl = fslMatch[1];
 
+  // PixelDrain
   const pxlMatch = html.match(/var\s+pxl\s*=\s*["']([^"']+pixeldrain[^"']+)["']/i);
   if (pxlMatch) links.pixeldrain = pxlMatch[1];
 
+  // Telegram
   const tgMatch = html.match(
     /href=["'](https:\/\/hubcloud\.cx\/tg\/go\?id=[^"']+)["']/i
   );
   if (tgMatch) links.telegram = tgMatch[1];
 
+  // Share link
   const shareMatch = html.match(
     /href=["'](https:\/\/hubcloud\.cx\/drive\/[^"']+)["'][^>]*readonly/i
   );
-  if (!shareMatch) {
+  if (shareMatch) {
+    links.shareLink = shareMatch[1];
+  } else {
     const inputMatch = html.match(
       /value=["'](https:\/\/hubcloud\.cx\/drive\/[^"']+)["']/i
     );
     if (inputMatch) links.shareLink = inputMatch[1];
-  } else {
-    links.shareLink = shareMatch[1];
   }
 
   return links;
@@ -183,20 +270,14 @@ async function scrapeHubDrive(fileUrl) {
   // ── Step 1: HubDrive ──
   let step1Html;
   try {
-    // Try without referer first
-    step1Html = await fetchPage(fileUrl);
+    step1Html = await fetchPage(fileUrl, "https://hubdrive.tips/");
   } catch (e) {
-    // If fails, try with referer
-    try {
-      step1Html = await fetchPage(fileUrl, "https://hubdrive.tips/");
-    } catch (e2) {
-      throw { message: `HubDrive fetch failed: ${e2.message}`, step: "hubdrive" };
-    }
+    throw { message: `HubDrive fetch failed: ${e.message}`, step: "hubdrive" };
   }
 
   let step1;
   try {
-    step1 = parseHubDrive(step1Html, fileUrl);
+    step1 = parseHubDrive(step1Html);
   } catch (e) {
     throw { message: e.message, step: "hubdrive_parse" };
   }
@@ -220,7 +301,7 @@ async function scrapeHubDrive(fileUrl) {
 
   let step2;
   try {
-    step2 = parseHubCloud(step2Html, step1.hubcloudUrl);
+    step2 = parseHubCloud(step2Html);
   } catch (e) {
     throw { message: e.message, step: "hubcloud_parse" };
   }
@@ -261,19 +342,28 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Preflight
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
+    // Health check
     if (url.pathname === "/" || url.pathname === "/health") {
       return jsonResponse({
         status: "ok",
         service: "HubDrive DL Scraper",
-        version: "1.0.2",
+        version: "3.0.0",
+        features: [
+          "FlareSolverr integration",
+          "Automatic Cloudflare bypass",
+          "Multiple fetch strategies",
+          "Automatic retry"
+        ],
         usage: "GET /scrape?url=https://hubdrive.tips/file/{ID}",
       });
     }
 
+    // ── /scrape ──
     if (url.pathname === "/scrape") {
       let fileUrl = null;
 
@@ -318,6 +408,7 @@ export default {
       }
     }
 
+    // 404
     return jsonResponse(
       {
         error: "Not Found",
