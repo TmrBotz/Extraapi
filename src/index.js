@@ -77,9 +77,6 @@ async function scrapePost(postUrl) {
         console.log(`🔗 Resolving: ${link.url}`);
         const finalUrl = await resolveShortLink(link.url);
         finalLinks.push({
-          quality: link.quality,
-          label: link.label,
-          size: link.size,
           finalUrl: finalUrl.mainUrl,
           mirrors: finalUrl.mirrors || [],
           fileInfo: finalUrl.fileInfo,
@@ -89,9 +86,6 @@ async function scrapePost(postUrl) {
       } catch (error) {
         console.error(`❌ Error resolving ${link.url}:`, error.message);
         finalLinks.push({
-          quality: link.quality,
-          label: link.label,
-          size: link.size,
           error: error.message,
           finalUrl: null,
           mirrors: []
