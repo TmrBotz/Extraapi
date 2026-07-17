@@ -62,6 +62,15 @@ async function fetchHTML(url) {
   return res.text();
 }
 
+// ── Step 0: Parse movie title from .Robiul div ───────────────
+
+function parseMovieTitle(html) {
+  // <div class='Robiul'><b> TITLE </b>  </div>
+  const m = html.match(/<div\s+class=['"]Robiul['"][^>]*>\s*<b>\s*([\s\S]*?)\s*<\/b>/i);
+  if (!m) return null;
+  return m[1].replace(/<[^>]+>/g, "").trim(); // strip any inner tags
+}
+
 // ── Step 1: Parse movie page → extract howblogs links ────────
 
 function parseMoviePage(html) {
@@ -149,6 +158,9 @@ async function scrapeMovie(movieSlug) {
     return { error: `Movie page fetch failed: ${e.message}`, url: movieURL };
   }
 
+  // ── Step 1.5: Extract title
+  const title = parseMovieTitle(movieHTML);
+
   // ── Step 2: Extract howblogs links
   const howblogsLinks = parseMoviePage(movieHTML);
   if (howblogsLinks.length === 0) {
@@ -183,10 +195,10 @@ async function scrapeMovie(movieSlug) {
   ];
 
   return {
+    title,
     movie: movieURL,
     howblogs_processed: howblogsLinks.length,
     groups,           // per-quality breakdown
-    final_links: allLinks,
   };
 }
 
