@@ -1,0 +1,12 @@
+name = "Extraapi"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# Optional: Custom domain bind karna ho to
+# [routes]
+# pattern = "scraper.yourdomain.com/*"
+# zone_name = "yourdomain.com"
