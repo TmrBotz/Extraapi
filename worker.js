@@ -5,18 +5,18 @@
 // ============================================================
 
 const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-  Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
   "Accept-Encoding": "gzip, deflate, br",
-  Connection: "keep-alive",
+  "Connection": "keep-alive",
   "Upgrade-Insecure-Requests": "1",
   "Sec-Fetch-Dest": "document",
   "Sec-Fetch-Mode": "navigate",
   "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
   "Cache-Control": "max-age=0",
+  "Pragma": "no-cache",
 };
 
 // ─── CORS helper ───────────────────────────────────────────
@@ -43,31 +43,52 @@ function errorResponse(message, step = null, status = 400) {
   return jsonResponse({ success: false, error: message, step }, status);
 }
 
-// ─── Fetch with Referer spoofing ───────────────────────────
-async function fetchPage(url, referer = null, extraHeaders = {}) {
-  const hdrs = {
+// ─── Fetch with Retry and Multiple User-Agents ───────────
+async function fetchPage(url, referer = null, extraHeaders = {}, retryCount = 0) {
+  const userAgents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+  ];
+
+  const headers = {
     ...HEADERS,
+    "User-Agent": userAgents[retryCount % userAgents.length],
     ...(referer ? { Referer: referer } : {}),
     ...extraHeaders,
   };
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: hdrs,
-    redirect: "follow",
-  });
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: headers,
+      redirect: "follow",
+      cf: {
+        cacheTtl: 0,
+        cacheEverything: false,
+      }
+    });
 
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} for ${url}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    return await res.text();
+  } catch (error) {
+    // Retry with different user-agent if 403 or timeout
+    if ((error.message.includes("403") || error.message.includes("timeout")) && retryCount < 3) {
+      console.log(`Retry ${retryCount + 1} for ${url}`);
+      // Add delay before retry
+      await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+      return fetchPage(url, referer, extraHeaders, retryCount + 1);
+    }
+    throw error;
   }
-
-  return await res.text();
 }
 
 // ─── STEP 1: hubdrive.tips/file/{id} ──────────────────────
-//   Extract:
-//     • hubcloud.ist/drive/{drive_id}  link
-//     • file name, size, type
 function parseHubDrive(html, pageUrl) {
   // File metadata
   const titleMatch = html.match(/<title>HubDrive \| (.+?)<\/title>/i);
@@ -83,7 +104,7 @@ function parseHubDrive(html, pageUrl) {
   );
   const fileType = typeMatch ? typeMatch[1].trim() : null;
 
-  // HubCloud link — pattern: href="https://hubcloud.ist/drive/..."
+  // HubCloud link
   const hubcloudMatch = html.match(
     /href="(https:\/\/hubcloud\.ist\/drive\/[^"]+)"/i
   );
@@ -103,15 +124,14 @@ function parseHubDrive(html, pageUrl) {
 }
 
 // ─── STEP 2: hubcloud.ist/drive/{drive_id} ─────────────────
-//   Extract:  sportverse.cc URL  (from JS var or anchor tag)
 function parseHubCloud(html, driveUrl) {
-  // Primary: JS variable  var url = 'https://sportverse.cc/...'
   let sportverseUrl = null;
 
+  // Primary: JS variable
   const varMatch = html.match(/var\s+url\s*=\s*['"]([^'"]+sportverse[^'"]+)['"]/i);
   if (varMatch) sportverseUrl = varMatch[1];
 
-  // Fallback: anchor tag id="download"
+  // Fallback: anchor tag
   if (!sportverseUrl) {
     const anchorMatch = html.match(
       /<a[^>]+id=["']download["'][^>]+href=["']([^"']+sportverse[^"']+)["']/i
@@ -127,22 +147,18 @@ function parseHubCloud(html, driveUrl) {
 }
 
 // ─── STEP 3: sportverse.cc/hubcloud.php?... ────────────────
-//   Extract:
-//     • FSL Server   — <a id="fsl" href="...">
-//     • PixelDrain   — var pxl = "..."
-//     • Telegram     — hubcloud.cx/tg/go?id=...
 function parseSportverse(html) {
   const links = {};
 
-  // 1. FSL Server (Cloudflare R2) — anchor tag id="fsl"
+  // 1. FSL Server
   const fslMatch = html.match(/<a[^>]+id=["']fsl["'][^>]+href=["']([^"']+)["']/i);
   if (fslMatch) links.fsl = fslMatch[1];
 
-  // 2. PixelDrain — JS variable  var pxl = "..."
+  // 2. PixelDrain
   const pxlMatch = html.match(/var\s+pxl\s*=\s*["']([^"']+pixeldrain[^"']+)["']/i);
   if (pxlMatch) links.pixeldrain = pxlMatch[1];
 
-  // 3. Telegram — hubcloud.cx/tg/go
+  // 3. Telegram
   const tgMatch = html.match(
     /href=["'](https:\/\/hubcloud\.cx\/tg\/go\?id=[^"']+)["']/i
   );
@@ -153,7 +169,6 @@ function parseSportverse(html) {
     /href=["'](https:\/\/hubcloud\.cx\/drive\/[^"']+)["'][^>]*readonly/i
   );
   if (!shareMatch) {
-    // try input value
     const inputMatch = html.match(
       /value=["'](https:\/\/hubcloud\.cx\/drive\/[^"']+)["']/i
     );
@@ -178,7 +193,7 @@ async function scrapeHubDrive(fileUrl) {
   // ── Step 1: HubDrive ──
   let step1Html;
   try {
-    step1Html = await fetchPage(fileUrl, "https://www.google.com/");
+    step1Html = await fetchPage(fileUrl, "https://hubdrive.tips/");
   } catch (e) {
     throw { message: `HubDrive fetch failed: ${e.message}`, step: "hubdrive" };
   }
@@ -220,7 +235,6 @@ async function scrapeHubDrive(fileUrl) {
   let step3Html;
   try {
     step3Html = await fetchPage(step2.sportverseUrl, step1.hubcloudUrl, {
-      // Sportverse expects hubcloud as referer
       Referer: step1.hubcloudUrl,
     });
   } catch (e) {
@@ -263,14 +277,13 @@ export default {
       return jsonResponse({
         status: "ok",
         service: "HubDrive DL Scraper",
-        version: "1.0.0",
+        version: "1.0.1",
         usage: "GET /scrape?url=https://hubdrive.tips/file/{ID}",
       });
     }
 
     // ── /scrape ──
     if (url.pathname === "/scrape") {
-      // Accept both GET (?url=...) and POST (body: { url })
       let fileUrl = null;
 
       if (request.method === "GET") {
@@ -286,7 +299,6 @@ export default {
         return errorResponse("Method not allowed", null, 405);
       }
 
-      // Validate URL
       if (!fileUrl) {
         return errorResponse(
           "Missing `url` parameter. Example: /scrape?url=https://hubdrive.tips/file/2012245024",
@@ -307,7 +319,6 @@ export default {
         const result = await scrapeHubDrive(fileUrl);
         return jsonResponse(result);
       } catch (err) {
-        // err is { message, step } from throws above
         return errorResponse(
           err.message || String(err),
           err.step || "unknown",
