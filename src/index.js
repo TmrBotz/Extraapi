@@ -78,9 +78,9 @@ async function scrapePost(postUrl) {
         const finalUrl = await resolveShortLink(link.url);
         finalLinks.push({
           finalUrl: finalUrl.mainUrl,
-          mirrors: finalUrl.mirrors || [],
           fileInfo: finalUrl.fileInfo,
-          fileSize: finalUrl.fileSize
+          fileSize: finalUrl.fileSize,
+          mirrors: finalUrl.mirrors || [],
         });
         await sleep(500);
       } catch (error) {
