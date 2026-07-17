@@ -1,12 +1,7 @@
-name = "Extraapi"
+name = "hubdrive-scraper"
 main = "worker.js"
-compatibility_date = "2024-09-23"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2024-12-18"
 
-[observability]
-enabled = true
-
-# Optional: Custom domain bind karna ho to
-# [routes]
-# pattern = "scraper.yourdomain.com/*"
-# zone_name = "yourdomain.com"
+# No static assets - pure API worker
+[env.production]
+vars = { ENVIRONMENT = "production" }
