@@ -1,11 +1,9 @@
 // ============================================
-// EXTRAFLIX SCRAPER - Cloudflare Worker
-// No KV, No Cache - Direct Scraping
+// EXTRAFLIX SCRAPER - Cloudflare Worker (FIXED)
 // ============================================
 
 export default {
   async fetch(request, env, ctx) {
-    // CORS Headers
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -13,7 +11,6 @@ export default {
       'Content-Type': 'application/json'
     };
 
-    // Handle OPTIONS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
@@ -22,7 +19,6 @@ export default {
       const url = new URL(request.url);
       const path = url.pathname;
 
-      // Health check (optional)
       if (path === '/health') {
         return new Response(JSON.stringify({
           status: 'ok',
@@ -30,7 +26,6 @@ export default {
         }), { headers: corsHeaders });
       }
 
-      // ONLY scrape endpoint
       if (path === '/scrape' && request.method === 'GET') {
         const postUrl = url.searchParams.get('url');
         if (!postUrl) {
@@ -45,7 +40,6 @@ export default {
         });
       }
 
-      // Invalid route
       return new Response(JSON.stringify({
         error: 'Invalid endpoint',
         usage: '/scrape?url=YOUR_POST_URL'
@@ -63,27 +57,24 @@ export default {
 // CORE SCRAPING FUNCTIONS
 // ============================================
 
-/**
- * Scrape a single post page and extract all download links
- */
 async function scrapePost(postUrl) {
   console.log(`🔄 Scraping: ${postUrl}`);
 
   try {
-    // Fetch the post page
     const response = await fetchWithRetry(postUrl);
     const html = await response.text();
 
-    // Extract data
     const title = extractTitle(html);
     const poster = extractPoster(html);
     const imdbRating = extractIMDB(html);
     const downloadLinks = extractDownloadLinks(html);
     
-    // Follow each short link to get final URL
+    console.log(`📦 Found ${downloadLinks.length} download links`);
+    
     const finalLinks = [];
     for (const link of downloadLinks) {
       try {
+        console.log(`🔗 Resolving: ${link.url}`);
         const finalUrl = await resolveShortLink(link.url);
         finalLinks.push({
           quality: link.quality,
@@ -94,9 +85,9 @@ async function scrapePost(postUrl) {
           fileInfo: finalUrl.fileInfo,
           fileSize: finalUrl.fileSize
         });
-        // Rate limiting - small delay between requests
         await sleep(500);
       } catch (error) {
+        console.error(`❌ Error resolving ${link.url}:`, error.message);
         finalLinks.push({
           quality: link.quality,
           label: link.label,
@@ -131,24 +122,16 @@ async function scrapePost(postUrl) {
 }
 
 // ============================================
-// HTML PARSING HELPERS
+// HTML PARSING HELPERS (FIXED)
 // ============================================
 
-/**
- * Extract post title from HTML
- */
 function extractTitle(html) {
   const match = html.match(/<h1[^>]*class="[^"]*page-title[^"]*"[^>]*>([^<]+)<\/h1>/i);
   return match ? match[1].trim() : null;
 }
 
-/**
- * Extract poster image URL
- */
 function extractPoster(html) {
-  // Try multiple patterns
   const patterns = [
-    /<img[^>]*class="[^"]*Poster-Container[^"]*"[^>]*src="([^"]+)"/i,
     /<img[^>]*src="([^"]*image\.tmdb\.org[^"]+)"[^>]*>/i,
     /<meta[^>]*property="og:image"[^>]*content="([^"]+)"/i,
     /<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"/i
@@ -162,84 +145,152 @@ function extractPoster(html) {
   return null;
 }
 
-/**
- * Extract IMDb rating
- */
 function extractIMDB(html) {
   const match = html.match(/IMDb Rating:<\/strong>.*?>\s*([\d.]+)\s*<\/a>/is);
   return match ? match[1] : null;
 }
 
-/**
- * Extract all download links from post page
- */
 function extractDownloadLinks(html) {
   const links = [];
   
-  // Find download options section
-  const sectionMatch = html.match(/<div[^>]*class="[^"]*download-options-section[^"]*"[^>]*>(.*?)<\/div>/is);
-  if (!sectionMatch) return links;
+  // ========== METHOD 1: Find all fasc-button links ==========
+  // Pattern: <a class="fasc-button ..." href="URL">Download Link</a>
+  const fascRegex = /<a[^>]*class="[^"]*fasc-button[^"]*"[^>]*href="([^"]+)"[^>]*>.*?Download\s*Link.*?<\/a>/gi;
+  let match;
+  let linkUrls = [];
   
-  const sectionHtml = sectionMatch[1];
-  
-  // Find all download links with quality labels
-  const parts = sectionHtml.split(/<p>/i);
-  
-  let currentQuality = null;
-  let currentSize = null;
-  
-  for (const part of parts) {
-    // Check for quality label (480p, 720p, 1080p, 4K)
-    const qualityMatch = part.match(/(\d+p|\dK)\s+(?:HEVC\s+)?(?:x\d+)?\s*[–-]?\s*\[([^\]]+)\]/i);
-    if (qualityMatch) {
-      currentQuality = qualityMatch[1].toLowerCase();
-      currentSize = qualityMatch[2].trim();
+  while ((match = fascRegex.exec(html)) !== null) {
+    const url = match[1];
+    if (url && (url.includes('links.linkshub.fun') || url.includes('linkhub'))) {
+      linkUrls.push(url);
     }
+  }
+  
+  // ========== METHOD 2: Extract from download-options-section ==========
+  const sectionMatch = html.match(/<div[^>]*class="[^"]*download-options-section[^"]*"[^>]*>(.*?)<\/div>/is);
+  if (sectionMatch) {
+    const sectionHtml = sectionMatch[1];
     
-    // Find link
-    const linkMatch = part.match(/<a[^>]*href="([^"]+)"[^>]*>.*?Download\s*Link.*?<\/a>/is);
-    if (linkMatch && currentQuality) {
-      const url = linkMatch[1];
+    // Find all <p> tags
+    const pRegex = /<p[^>]*>(.*?)<\/p>/gi;
+    let pMatch;
+    let quality = null;
+    let size = null;
+    let url = null;
+    
+    while ((pMatch = pRegex.exec(sectionHtml)) !== null) {
+      const content = pMatch[1];
       
-      // Check if it's a short link
-      if (url.includes('links.linkshub.fun') || url.includes('linkhub')) {
-        links.push({
-          quality: currentQuality,
-          label: `Download ${currentQuality}`,
-          size: currentSize || 'Unknown',
-          url: url
-        });
-        currentQuality = null;
-        currentSize = null;
+      // Check for quality label
+      const qualityMatch = content.match(/(\d+p|\dK)\s+(?:HEVC\s+)?(?:x\d+)?\s*[–-]?\s*\[([^\]]+)\]/i);
+      if (qualityMatch) {
+        quality = qualityMatch[1].toLowerCase();
+        size = qualityMatch[2].trim();
+        // Try to find link in same paragraph
+        const linkInP = content.match(/<a[^>]*href="([^"]+)"[^>]*>/i);
+        if (linkInP) {
+          url = linkInP[1];
+          if (url && (url.includes('links.linkshub.fun') || url.includes('linkhub'))) {
+            links.push({
+              quality: quality,
+              label: `Download ${quality}`,
+              size: size,
+              url: url
+            });
+            quality = null;
+            size = null;
+            url = null;
+          }
+        }
+      }
+      
+      // Check for link without quality (fallback)
+      const linkMatch = content.match(/<a[^>]*href="([^"]+)"[^>]*>.*?Download\s*Link.*?<\/a>/i);
+      if (linkMatch && quality) {
+        url = linkMatch[1];
+        if (url && (url.includes('links.linkshub.fun') || url.includes('linkhub'))) {
+          links.push({
+            quality: quality,
+            label: `Download ${quality}`,
+            size: size || 'Unknown',
+            url: url
+          });
+          quality = null;
+          size = null;
+          url = null;
+        }
       }
     }
   }
   
-  return links;
+  // ========== METHOD 3: Direct link extraction from entire HTML ==========
+  // Find all links with quality in surrounding text
+  const allLinks = html.match(/<a[^>]*href="([^"]*links\.linkshub\.fun[^"]*)"[^>]*>/gi) || [];
+  for (const linkHtml of allLinks) {
+    const urlMatch = linkHtml.match(/href="([^"]+)"/i);
+    if (!urlMatch) continue;
+    const url = urlMatch[1];
+    
+    // Check if already added
+    if (linkUrls.includes(url)) continue;
+    
+    // Try to find quality from surrounding context
+    const contextStart = html.indexOf(linkHtml) - 200;
+    const contextEnd = html.indexOf(linkHtml) + linkHtml.length + 200;
+    const context = html.substring(Math.max(0, contextStart), Math.min(html.length, contextEnd));
+    
+    const qualityMatch = context.match(/(\d+p|\dK)\s+(?:HEVC\s+)?(?:x\d+)?\s*[–-]?\s*\[([^\]]+)\]/i);
+    if (qualityMatch) {
+      links.push({
+        quality: qualityMatch[1].toLowerCase(),
+        label: `Download ${qualityMatch[1].toLowerCase()}`,
+        size: qualityMatch[2].trim(),
+        url: url
+      });
+    } else {
+      // Fallback: try to determine quality from filename
+      const fileMatch = url.match(/\.(\d+p|4k)/i) || context.match(/(\d+p|4K)/i);
+      const quality = fileMatch ? fileMatch[1].toLowerCase() : 'unknown';
+      links.push({
+        quality: quality,
+        label: `Download ${quality}`,
+        size: 'Unknown',
+        url: url
+      });
+    }
+  }
+  
+  // Remove duplicates based on URL
+  const uniqueLinks = [];
+  const seenUrls = new Set();
+  for (const link of links) {
+    if (!seenUrls.has(link.url)) {
+      seenUrls.add(link.url);
+      uniqueLinks.push(link);
+    }
+  }
+  
+  console.log(`✅ Extracted ${uniqueLinks.length} unique links`);
+  return uniqueLinks;
 }
 
 // ============================================
 // SHORT LINK RESOLVER
 // ============================================
 
-/**
- * Resolve links.linkshub.fun short URL to final download URL
- */
 async function resolveShortLink(shortUrl) {
   console.log(`🔗 Resolving: ${shortUrl}`);
   
   try {
-    // Fetch the short link page
     const response = await fetchWithRetry(shortUrl);
     const html = await response.text();
     
-    // Extract all final URLs from the page
     const mirrors = [];
+    let mainUrl = null;
     
     // Pattern 1: Direct drivehub/hubdrive links
     const linkRegex = /<a[^>]*href="([^"]*drivehub[^"]*|[^"]*hubdrive[^"]*)"[^>]*>/gi;
     let match;
-    let mainUrl = null;
     
     while ((match = linkRegex.exec(html)) !== null) {
       const url = match[1];
@@ -249,7 +300,7 @@ async function resolveShortLink(shortUrl) {
       }
     }
     
-    // Pattern 2: Links in div with flex display
+    // Pattern 2: Links in flex div
     if (!mainUrl) {
       const altRegex = /<div[^>]*style="[^"]*display:flex[^"]*"[^>]*>.*?<a[^>]*href="([^"]*drivehub[^"]*)"[^>]*>/is;
       const altMatch = html.match(altRegex);
@@ -273,17 +324,15 @@ async function resolveShortLink(shortUrl) {
       throw new Error('No download URL found on short link page');
     }
     
-    // Extract file info from title
     const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
     const fileInfo = titleMatch ? titleMatch[1] : null;
     
-    // Extract file size from title or page
     const sizeMatch = html.match(/([\d.]+)\s*(GB|MB)/i);
     const fileSize = sizeMatch ? `${sizeMatch[1]} ${sizeMatch[2]}` : null;
     
     return {
       mainUrl: mainUrl,
-      mirrors: [...new Set(mirrors)], // Remove duplicates
+      mirrors: [...new Set(mirrors)],
       fileInfo: fileInfo,
       fileSize: fileSize
     };
@@ -298,9 +347,6 @@ async function resolveShortLink(shortUrl) {
 // UTILITY FUNCTIONS
 // ============================================
 
-/**
- * Fetch with retry logic
- */
 async function fetchWithRetry(url, options = {}, maxRetries = 3) {
   let lastError;
   
@@ -336,9 +382,6 @@ async function fetchWithRetry(url, options = {}, maxRetries = 3) {
   throw lastError || new Error('All retry attempts failed');
 }
 
-/**
- * Sleep helper
- */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
