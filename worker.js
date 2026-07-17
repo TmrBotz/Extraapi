@@ -1,23 +1,34 @@
 // ============================================================
 //  HubDrive → HubCloud → Sportverse  DL Link Extractor
 //  Cloudflare Worker  |  Professional Web Scraper
-//  Deploy: wrangler deploy
 // ============================================================
 
-const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  "Connection": "keep-alive",
-  "Upgrade-Insecure-Requests": "1",
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "none",
-  "Sec-Fetch-User": "?1",
-  "Cache-Control": "max-age=0",
-  "Pragma": "no-cache",
-};
+// Advanced headers with realistic browser fingerprint
+function getHeaders(referer = null) {
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Not/A)Brand";v="99", "Google Chrome";v="126", "Chromium";v="126"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "DNT": "1",
+  };
+  
+  if (referer) {
+    headers["Referer"] = referer;
+  }
+  
+  return headers;
+}
 
 // ─── CORS helper ───────────────────────────────────────────
 function corsHeaders(origin = "*") {
@@ -43,31 +54,20 @@ function errorResponse(message, step = null, status = 400) {
   return jsonResponse({ success: false, error: message, step }, status);
 }
 
-// ─── Fetch with Retry and Multiple User-Agents ───────────
-async function fetchPage(url, referer = null, extraHeaders = {}, retryCount = 0) {
-  const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
-  ];
-
-  const headers = {
-    ...HEADERS,
-    "User-Agent": userAgents[retryCount % userAgents.length],
-    ...(referer ? { Referer: referer } : {}),
-    ...extraHeaders,
-  };
-
+// ─── Enhanced Fetch with Browser Simulation ──────────────
+async function fetchPage(url, referer = null) {
+  const headers = getHeaders(referer);
+  
   try {
     const res = await fetch(url, {
       method: "GET",
       headers: headers,
       redirect: "follow",
+      // Cloudflare specific options
       cf: {
         cacheTtl: 0,
         cacheEverything: false,
+        // Try to use different colo
       }
     });
 
@@ -75,15 +75,11 @@ async function fetchPage(url, referer = null, extraHeaders = {}, retryCount = 0)
       throw new Error(`HTTP ${res.status}`);
     }
 
-    return await res.text();
+    // Get response as text but preserve headers for debugging
+    const text = await res.text();
+    return text;
   } catch (error) {
-    // Retry with different user-agent if 403 or timeout
-    if ((error.message.includes("403") || error.message.includes("timeout")) && retryCount < 3) {
-      console.log(`Retry ${retryCount + 1} for ${url}`);
-      // Add delay before retry
-      await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-      return fetchPage(url, referer, extraHeaders, retryCount + 1);
-    }
+    console.error(`Fetch error for ${url}:`, error);
     throw error;
   }
 }
@@ -127,11 +123,9 @@ function parseHubDrive(html, pageUrl) {
 function parseHubCloud(html, driveUrl) {
   let sportverseUrl = null;
 
-  // Primary: JS variable
   const varMatch = html.match(/var\s+url\s*=\s*['"]([^'"]+sportverse[^'"]+)['"]/i);
   if (varMatch) sportverseUrl = varMatch[1];
 
-  // Fallback: anchor tag
   if (!sportverseUrl) {
     const anchorMatch = html.match(
       /<a[^>]+id=["']download["'][^>]+href=["']([^"']+sportverse[^"']+)["']/i
@@ -150,21 +144,17 @@ function parseHubCloud(html, driveUrl) {
 function parseSportverse(html) {
   const links = {};
 
-  // 1. FSL Server
   const fslMatch = html.match(/<a[^>]+id=["']fsl["'][^>]+href=["']([^"']+)["']/i);
   if (fslMatch) links.fsl = fslMatch[1];
 
-  // 2. PixelDrain
   const pxlMatch = html.match(/var\s+pxl\s*=\s*["']([^"']+pixeldrain[^"']+)["']/i);
   if (pxlMatch) links.pixeldrain = pxlMatch[1];
 
-  // 3. Telegram
   const tgMatch = html.match(
     /href=["'](https:\/\/hubcloud\.cx\/tg\/go\?id=[^"']+)["']/i
   );
   if (tgMatch) links.telegram = tgMatch[1];
 
-  // Share link
   const shareMatch = html.match(
     /href=["'](https:\/\/hubcloud\.cx\/drive\/[^"']+)["'][^>]*readonly/i
   );
@@ -193,9 +183,15 @@ async function scrapeHubDrive(fileUrl) {
   // ── Step 1: HubDrive ──
   let step1Html;
   try {
-    step1Html = await fetchPage(fileUrl, "https://hubdrive.tips/");
+    // Try without referer first
+    step1Html = await fetchPage(fileUrl);
   } catch (e) {
-    throw { message: `HubDrive fetch failed: ${e.message}`, step: "hubdrive" };
+    // If fails, try with referer
+    try {
+      step1Html = await fetchPage(fileUrl, "https://hubdrive.tips/");
+    } catch (e2) {
+      throw { message: `HubDrive fetch failed: ${e2.message}`, step: "hubdrive" };
+    }
   }
 
   let step1;
@@ -234,9 +230,7 @@ async function scrapeHubDrive(fileUrl) {
   // ── Step 3: Sportverse ──
   let step3Html;
   try {
-    step3Html = await fetchPage(step2.sportverseUrl, step1.hubcloudUrl, {
-      Referer: step1.hubcloudUrl,
-    });
+    step3Html = await fetchPage(step2.sportverseUrl, step1.hubcloudUrl);
   } catch (e) {
     throw { message: `Sportverse fetch failed: ${e.message}`, step: "sportverse" };
   }
@@ -267,22 +261,19 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Preflight
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    // Health check
     if (url.pathname === "/" || url.pathname === "/health") {
       return jsonResponse({
         status: "ok",
         service: "HubDrive DL Scraper",
-        version: "1.0.1",
+        version: "1.0.2",
         usage: "GET /scrape?url=https://hubdrive.tips/file/{ID}",
       });
     }
 
-    // ── /scrape ──
     if (url.pathname === "/scrape") {
       let fileUrl = null;
 
@@ -327,7 +318,6 @@ export default {
       }
     }
 
-    // 404
     return jsonResponse(
       {
         error: "Not Found",
